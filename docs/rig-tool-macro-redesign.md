@@ -346,6 +346,24 @@ providers with what OpenAI and Anthropic already enforce. It also makes the
 provider-level sanitization redundant — which could be removed in a future
 cleanup.
 
+## Design decisions
+
+### Tool name is always derived from the function name
+
+There is no `name = "..."` override attribute. The tool name is the function
+name as a string (`fn add` -> `"add"`). The struct name is PascalCase
+(`Add`), the static is UPPER_SNAKE (`ADD`). This is a deliberate simplicity
+choice — if you need a different name, name the function differently. A
+`name` attribute could be added later if real use cases emerge, but it's out
+of scope for this change.
+
+### No stateful tools (`&self` context)
+
+The macro targets free functions, not methods. The generated struct is a
+zero-sized unit struct (`struct Add;`) with no fields. Tools that need runtime
+state (database handles, API clients) should implement the `Tool` trait
+manually — the macro is for the common stateless case.
+
 ## Known quirks
 
 ### Q1: schemars `Option<T>` representation vs OpenAI strict mode
@@ -389,6 +407,101 @@ keywords next to `$ref`. Test with complex types against all providers.
 The macro emits `rig::schemars::JsonSchema` and `rig::schemars::schema_for!()`.
 This requires `pub use schemars;` in rig-core's lib.rs. Users who also depend
 on schemars directly won't conflict — it's the same version from workspace.
+
+## Implementation references
+
+### Doc comment extraction pattern (syn)
+
+`/// My doc` compiles to `#[doc = " My doc"]`. Multi-line doc comments produce
+multiple `#[doc = "..."]` attrs. The extraction pattern:
+
+```rust
+fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
+    let lines: Vec<String> = attrs
+        .iter()
+        .filter_map(|attr| {
+            if !attr.path().is_ident("doc") {
+                return None;
+            }
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s), ..
+                }) = &nv.value
+                {
+                    return Some(s.value());
+                }
+            }
+            None
+        })
+        .collect();
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Each line has a leading space from `/// ` syntax — trim it
+    Some(
+        lines
+            .iter()
+            .map(|l| l.strip_prefix(' ').unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
+    )
+}
+```
+
+For parameter doc comments, the same function is called on `pat_type.attrs`
+(each `FnArg::Typed` carries its own `attrs` vec).
+
+### schemars 1.0 `schema_for!` output shape
+
+For a struct like:
+
+```rust
+#[derive(schemars::JsonSchema)]
+struct SearchParameters {
+    /// The search query string
+    query: String,
+    /// Maximum results
+    #[serde(default)]
+    limit: Option<i32>,
+}
+```
+
+`schemars::schema_for!(SearchParameters)` produces (serialized):
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SearchParameters",
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The search query string"
+    },
+    "limit": {
+      "anyOf": [{ "type": "integer", "format": "int32" }, { "type": "null" }],
+      "default": null,
+      "description": "Maximum results"
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+Key observations for post-processing:
+
+- `$schema` and `title` are present at the root — harmless, providers ignore
+  them
+- `properties` contains the fields with descriptions from `#[doc]` attrs
+- `Option<T>` produces `anyOf` with a null variant, plus `"default": null`
+  from `#[serde(default)]`
+- `additionalProperties: false` is added by schemars 1.0 by default
+- **No `required` array** — must be injected by the macro
+- Integer types include a `"format": "int32"` — harmless, providers ignore it
 
 ## Precedent
 
