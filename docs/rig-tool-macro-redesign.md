@@ -104,16 +104,16 @@ schemars generates JSON Schema from Rust types automatically. Key mappings:
 | `String`                 | `"type": "string"`                                | Yes            | No                   |
 | `bool`                   | `"type": "boolean"`                               | Yes            | No                   |
 | `Vec<T>`                 | `"type": "array", "items": {...}`                 | Yes            | No                   |
-| `Option<T>`              | `"anyOf": [{"type": "T"}, {"type": "null"}]`      | Yes            | Yes (auto-added)     |
+| `Option<T>`              | `"type": ["T", "null"]`                           | Yes            | Yes (auto-added)     |
 | `HashMap<String, T>`     | `"type": "object", "additionalProperties": {...}` | Yes            | No                   |
 | Custom struct            | `"type": "object", "properties": {...}` + `$defs` | Yes            | No                   |
 | Enum (serde-tagged)      | `"oneOf": [...]` or `"enum": [...]`               | Yes            | No                   |
 
 The `Option<T>` handling follows OpenAI's strict mode convention: all fields
-stay in `required`, but nullable types get an `anyOf` with `null`. The macro
-auto-adds `#[serde(default)]` on `Option<T>` fields in the generated params
-struct so that deserialization succeeds when the LLM omits the field or sends
-`null`.
+stay in `required`, but nullable types get a type array including `"null"`. The
+macro auto-adds `#[serde(default)]` on `Option<T>` fields in the generated
+params struct so that deserialization succeeds when the LLM omits the field or
+sends `null`.
 
 ### Breaking change: integer types
 
@@ -368,11 +368,10 @@ manually — the macro is for the common stateless case.
 
 ### Q1: schemars `Option<T>` representation vs OpenAI strict mode
 
-schemars 1.0 represents `Option<T>` as
-`{"anyOf": [{"type": "T"}, {"type": "null"}]}`, not
-`{"type": ["T", "null"]}`. OpenAI's sanitizer already handles `anyOf`, and the
-`anyOf` form is valid JSON Schema. Verify with integration tests that the
-schema round-trips through both OpenAI and Anthropic sanitizers without loss.
+schemars 1.0.4 represents `Option<T>` as `{"type": ["T", "null"]}` (a type
+array), not the `anyOf` form. This is valid JSON Schema. Both the OpenAI and
+Anthropic sanitizers recurse into `properties` but do not specifically process
+type arrays — they pass through unchanged, which is the correct behavior.
 
 ### Q2: schemars does not populate `required`
 
@@ -383,9 +382,11 @@ Anthropic convention), the macro post-processes the schema to inject the
 
 ### Q3: Parameter doc comment syntax
 
-`/// comment` on function parameters is stable Rust syntax but uncommon. syn
-parses it correctly. rustfmt preserves parameter attributes in Rust 2024
-edition.
+`/// comment` on function parameters is parsed by syn but rejected by the
+compiler (`#[doc]` is not an allowed built-in attribute on function
+parameters). The macro strips `#[doc]` attributes from parameters before
+re-emitting the function, so this works transparently — syn reads the doc
+comments, and the cleaned function compiles without errors.
 
 ### Q4: Explicit attribute vs doc comment conflict
 
@@ -483,12 +484,12 @@ struct SearchParameters {
       "description": "The search query string"
     },
     "limit": {
-      "anyOf": [{ "type": "integer", "format": "int32" }, { "type": "null" }],
+      "type": ["integer", "null"],
+      "format": "int32",
       "default": null,
       "description": "Maximum results"
     }
-  },
-  "additionalProperties": false
+  }
 }
 ```
 
@@ -497,9 +498,10 @@ Key observations for post-processing:
 - `$schema` and `title` are present at the root — harmless, providers ignore
   them
 - `properties` contains the fields with descriptions from `#[doc]` attrs
-- `Option<T>` produces `anyOf` with a null variant, plus `"default": null`
+- `Option<T>` produces a type array `["T", "null"]`, plus `"default": null`
   from `#[serde(default)]`
-- `additionalProperties: false` is added by schemars 1.0 by default
+- schemars 1.0.4 does **not** add `additionalProperties: false` — the
+  provider sanitizers add it downstream
 - **No `required` array** — must be injected by the macro
 - Integer types include a `"format": "int32"` — harmless, providers ignore it
 
