@@ -8,6 +8,10 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -15,17 +19,33 @@
       self,
       nixpkgs,
       flake-utils,
-      rust-overlay
+      rust-overlay,
+      treefmt-nix,
     }:
     flake-utils.lib.eachDefaultSystem (system:
-      let 
+      let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
         };
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+        treefmtEval = treefmt-nix.lib.evalModule pkgs {
+          projectRootFile = "flake.nix";
+          programs.rustfmt = {
+            enable = true;
+            package = rustToolchain;
+          };
+          programs.prettier = {
+            enable = true;
+            includes = [ "docs/*.md" "docs/**/*.md" ];
+          };
+        };
       in
-      { 
+      {
+        formatter = treefmtEval.config.build.wrapper;
+        checks.formatting = treefmtEval.config.build.check self;
+
         devShells.default = with pkgs; mkShell {
           buildInputs = [
             pkg-config
